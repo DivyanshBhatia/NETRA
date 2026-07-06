@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rebuttal Experiment 2: McNemar paired tests on ImageNet-1K / ImageNet-V2.
 
-v2 — self-contained HuggingFace loading that downloads ONLY the ~6.7 GB
+v3 — self-contained HuggingFace loading that downloads ONLY the ~6.7 GB
 validation parquet shards (the repo's load_imagenet_huggingface triggers a
 ~150 GB all-splits download). No patch to run_imagenet.py needed.
 
@@ -48,20 +48,39 @@ logger = logging.getLogger(__name__)
 def load_imagenet_val_only_hf(val_size=None):
     """Load ONLY ImageNet-1K validation shards from HuggingFace.
 
-    Uses a data_files glob so the `datasets` library never prepares the
-    train/test splits. Requires `hf auth login` + accepted license at
+    v3: lists the dataset repo's actual files via the Hub API and downloads
+    exactly the validation parquet shards (no filename guessing, no train
+    split). Requires `hf auth login` + accepted license at
     https://huggingface.co/datasets/ILSVRC/imagenet-1k
     """
     from datasets import load_dataset
+    from huggingface_hub import HfApi, hf_hub_download
     from PIL import Image as PILImage
 
-    print("  Loading ImageNet val (val-only parquet shards) from HuggingFace...")
-    ds = load_dataset(
-        "parquet",
-        data_files={"validation":
-                    "hf://datasets/ILSVRC/imagenet-1k/data/val-*.parquet"},
-        split="validation",
+    repo = "ILSVRC/imagenet-1k"
+    print("  Listing dataset repo files...")
+    all_files = HfApi().list_repo_files(repo, repo_type="dataset")
+    parquets = [f for f in all_files if f.endswith(".parquet")]
+    val_files = sorted(
+        f for f in parquets
+        if Path(f).name.lower().startswith(("val-", "validation-", "val_", "validation_"))
     )
+    if not val_files:
+        listing = "\n    ".join(sorted(parquets)[:40]) or "\n    ".join(sorted(all_files)[:40])
+        raise RuntimeError(
+            "No validation parquet shards recognized. Repo files include:\n    "
+            + listing +
+            "\n  -> tell me these names and I will adjust the filter.")
+
+    print(f"  Found {len(val_files)} validation shard(s); downloading (~1 GB each, cached/resumable):")
+    local = []
+    for f in val_files:
+        print(f"    {f}")
+        local.append(hf_hub_download(repo, f, repo_type="dataset"))
+
+    ds = load_dataset("parquet", data_files={"validation": local}, split="validation")
+    if len(ds) == 0:
+        raise RuntimeError("Loaded 0 rows from validation shards - report this.")
 
     classnames = download_imagenet_classnames()
     if classnames is None:
